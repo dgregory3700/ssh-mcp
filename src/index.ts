@@ -105,6 +105,16 @@ export function escapeCommandForShell(command: string): string {
   return command.replace(/'/g, "'\"'\"'");
 }
 
+// Format command result: stdout, with any stderr appended under a marker.
+// (Patch: stderr presence no longer implies failure — exit code decides.)
+export function formatCommandOutput(stdout: string, stderr: string): string {
+  if (!stderr) {
+    return stdout;
+  }
+  const separator = stdout && !stdout.endsWith('\n') ? '\n' : '';
+  return `${stdout}${separator}[stderr]\n${stderr}`;
+}
+
 // SSH Connection Manager to maintain persistent connection
 export interface SSHConfig {
   host: string;
@@ -340,7 +350,7 @@ let connectionManager: SSHConnectionManager | null = null;
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.5.0',
+  version: '1.5.0-exitcode.1',
   capabilities: {
     resources: {},
     tools: {},
@@ -586,15 +596,19 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         if (!isResolved) {
           isResolved = true;
           clearTimeout(timeoutId);
-          if (stderr) {
-            reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
-          } else {
+          // Patch: success/failure is decided by the exit code, not by the mere
+          // presence of stderr. Many well-behaved tools (git, curl, npm) write
+          // progress or diagnostics to stderr on success.
+          if (code === 0) {
             resolve({
               content: [{
                 type: 'text',
-                text: stdout,
+                text: formatCommandOutput(stdout, stderr),
               }],
             });
+          } else {
+            const exitInfo = signal ? `exit code ${code}, signal ${signal}` : `exit code ${code}`;
+            reject(new McpError(ErrorCode.InternalError, `Command failed (${exitInfo}):\n${stderr || stdout}`));
           }
         }
       });
@@ -661,15 +675,18 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
             isResolved = true;
             clearTimeout(timeoutId);
             conn.end();
-            if (stderr) {
-              reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
-            } else {
+            // Patch: success/failure is decided by the exit code, not by the mere
+            // presence of stderr (see execSshCommandWithConnection).
+            if (code === 0) {
               resolve({
                 content: [{
                   type: 'text',
-                  text: stdout,
+                  text: formatCommandOutput(stdout, stderr),
                 }],
               });
+            } else {
+              const exitInfo = signal ? `exit code ${code}, signal ${signal}` : `exit code ${code}`;
+              reject(new McpError(ErrorCode.InternalError, `Command failed (${exitInfo}):\n${stderr || stdout}`));
             }
           }
         });
